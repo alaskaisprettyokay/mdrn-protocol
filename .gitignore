@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys (never commit)
+*.key
+*.pem
+*.json.key
+
+# Environment
+.env
+.env.local
+
+# Contracts build artifacts
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+# Node (for contracts tooling)
+node_modules/

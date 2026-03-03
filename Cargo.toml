@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "mdrn-core",
+    "mdrn-cli",
+    "mdrn-relay",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Christopher Rose <chris@mdrn.ai>"]
+repository = "https://github.com/alaskaisprettyokay/mdrn-protocol"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+serde_repr = "0.1"
+ciborium = "0.2"  # CBOR implementation
+
+# Utilities
+bitflags = { version = "2.4", features = ["serde"] }
+hex = "0.4"
+
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+k256 = { version = "0.13", features = ["ecdsa", "serde"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+# Networking
+libp2p = { version = "0.54", features = [
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "identify",
+    "kad",
+    "gossipsub",
+    "autonat",
+    "relay",
+    "dcutr",
+    "tokio",
+    "macros",
+    "serde",
+] }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+futures = "0.3"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Internal crates
+mdrn-core = { path = "mdrn-core" }

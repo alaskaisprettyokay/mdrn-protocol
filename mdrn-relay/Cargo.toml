@@ -1,0 +1,25 @@
+[package]
+name = "mdrn-relay"
+description = "MDRN standalone relay node daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mdrn-relay"
+path = "src/main.rs"
+
+[dependencies]
+mdrn-core.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+anyhow.workspace = true

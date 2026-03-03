@@ -1,0 +1,28 @@
+[package]
+name = "mdrn-cli"
+description = "MDRN command-line broadcaster/listener/relay tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mdrn"
+path = "src/main.rs"
+
+[dependencies]
+mdrn-core.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Async
+tokio.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Error handling
+anyhow.workspace = true

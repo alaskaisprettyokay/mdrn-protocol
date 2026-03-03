@@ -1,0 +1,41 @@
+[package]
+name = "mdrn-core"
+description = "MDRN protocol library - identity, messages, crypto, streams, payments, transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Serialization
+serde.workspace = true
+serde_bytes.workspace = true
+serde_repr.workspace = true
+ciborium.workspace = true
+
+# Utilities
+bitflags.workspace = true
+hex.workspace = true
+
+# Cryptography
+ed25519-dalek.workspace = true
+k256.workspace = true
+chacha20poly1305.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+rand.workspace = true
+
+# Networking
+libp2p.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+
+# Logging & errors
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
