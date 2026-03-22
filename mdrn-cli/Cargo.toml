@@ -35,6 +35,10 @@ rubato.workspace = true
 # Serialization (for keypair/vouch loading)
 ciborium.workspace = true
 hex.workspace = true
+serde.workspace = true
 
 # Random number generation
 rand.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

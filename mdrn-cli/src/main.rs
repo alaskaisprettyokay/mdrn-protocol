@@ -40,6 +40,10 @@ enum Commands {
         /// Encrypt the stream
         #[arg(short, long)]
         encrypted: bool,
+
+        /// Broadcast to libp2p network (vs stdout mode)
+        #[arg(short, long)]
+        network: bool,
     },
 
     /// Listen to a stream
@@ -119,6 +123,7 @@ fn main() -> Result<()> {
             input,
             bitrate,
             encrypted,
+            network,
         } => {
             use broadcast::{load_keypair_default, load_vouch_default, run_broadcast, BroadcastConfig};
 
@@ -127,6 +132,7 @@ fn main() -> Result<()> {
                 input = ?input,
                 bitrate = bitrate,
                 encrypted = encrypted,
+                network = network,
                 "Starting broadcast..."
             );
 
@@ -162,40 +168,56 @@ fn main() -> Result<()> {
                 encrypted,
             };
 
-            let result = run_broadcast(&keypair, &vouch, &config)?;
+            if network {
+                // Network mode: broadcast to libp2p network
+                use broadcast::broadcast_to_network;
 
-            // Output results
-            println!("\n=== Broadcast Complete ===");
-            println!("Stream ID: {}", stream_id);
-            println!("Stream Address: {}", hex::encode(&result.announcement.stream_addr));
-            println!("Broadcaster: {}", hex::encode(keypair.identity().as_bytes()));
-            println!("Codec: {:?}", result.announcement.codec);
-            println!("Bitrate: {} kbps", result.announcement.bitrate);
-            println!("Sample Rate: {} Hz", result.announcement.sample_rate);
-            println!("Channels: {}", result.announcement.channels);
-            println!("Encrypted: {}", result.announcement.encrypted);
-            println!("Chunks: {}", result.chunks.len());
-            println!("Duration: {} ms", result.chunks.len() * 20);
+                let rt = tokio::runtime::Runtime::new()?;
+                let result = rt.block_on(broadcast_to_network(&keypair, &vouch, &config))?;
 
-            if let Some(key) = &result.stream_key {
-                println!("Stream Key: {}", hex::encode(key));
-            }
+                println!("\n=== Network Broadcast Complete ===");
+                println!("Stream ID: {}", stream_id);
+                println!("Stream Address: {}", hex::encode(&result.announcement.stream_addr));
+                println!("Broadcaster: {}", hex::encode(keypair.identity().as_bytes()));
+                println!("Chunks Published: {}", result.chunks_published);
+                println!("Announcement Stored: {}", result.announcement_stored);
+            } else {
+                // Stdout mode: just output results (original behavior)
+                let result = run_broadcast(&keypair, &vouch, &config)?;
 
-            // Output first chunk info
-            if let Some(first) = result.chunks.first() {
-                println!("\nFirst chunk:");
-                println!("  Seq: {}", first.seq);
-                println!("  Timestamp: {} us", first.timestamp);
-                println!("  Data size: {} bytes", first.data.len());
-                println!("  Keyframe: {}", first.is_keyframe());
-            }
+                // Output results
+                println!("\n=== Broadcast Complete ===");
+                println!("Stream ID: {}", stream_id);
+                println!("Stream Address: {}", hex::encode(&result.announcement.stream_addr));
+                println!("Broadcaster: {}", hex::encode(keypair.identity().as_bytes()));
+                println!("Codec: {:?}", result.announcement.codec);
+                println!("Bitrate: {} kbps", result.announcement.bitrate);
+                println!("Sample Rate: {} Hz", result.announcement.sample_rate);
+                println!("Channels: {}", result.announcement.channels);
+                println!("Encrypted: {}", result.announcement.encrypted);
+                println!("Chunks: {}", result.chunks.len());
+                println!("Duration: {} ms", result.chunks.len() * 20);
 
-            // Output last chunk info
-            if let Some(last) = result.chunks.last() {
-                println!("\nLast chunk:");
-                println!("  Seq: {}", last.seq);
-                println!("  Timestamp: {} us", last.timestamp);
-                println!("  Data size: {} bytes", last.data.len());
+                if let Some(key) = &result.stream_key {
+                    println!("Stream Key: {}", hex::encode(key));
+                }
+
+                // Output first chunk info
+                if let Some(first) = result.chunks.first() {
+                    println!("\nFirst chunk:");
+                    println!("  Seq: {}", first.seq);
+                    println!("  Timestamp: {} us", first.timestamp);
+                    println!("  Data size: {} bytes", first.data.len());
+                    println!("  Keyframe: {}", first.is_keyframe());
+                }
+
+                // Output last chunk info
+                if let Some(last) = result.chunks.last() {
+                    println!("\nLast chunk:");
+                    println!("  Seq: {}", last.seq);
+                    println!("  Timestamp: {} us", last.timestamp);
+                    println!("  Data size: {} bytes", last.data.len());
+                }
             }
         }
 

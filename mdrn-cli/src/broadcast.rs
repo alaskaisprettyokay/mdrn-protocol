@@ -337,3 +337,93 @@ pub fn run_broadcast(keypair: &Keypair, vouch: &Vouch, config: &BroadcastConfig)
         stream_key: stream_key.map(|k| k.to_vec()),
     })
 }
+/// Result of network broadcast operation
+pub struct NetworkBroadcastResult {
+    pub announcement: StreamAnnouncement,
+    pub chunks_published: usize,
+    pub announcement_stored: bool,
+}
+
+/// Broadcast to libp2p network
+///
+/// This function:
+/// 1. Processes audio using run_broadcast() 
+/// 2. Creates MdrnSwarm
+/// 3. Stores StreamAnnouncement in DHT
+/// 4. Subscribes to stream topic
+/// 5. Publishes chunks via gossipsub (with 20ms pacing)
+pub async fn broadcast_to_network(
+    keypair: &Keypair,
+    vouch: &Vouch,
+    config: &BroadcastConfig<'_>,
+) -> Result<NetworkBroadcastResult> {
+    use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE};
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    // First, process audio using existing pipeline
+    let broadcast_result = run_broadcast(keypair, vouch, config)?;
+
+    // Create swarm with same keypair
+    let swarm_config = TransportConfig {
+        listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+        bootstrap_nodes: vec![],
+        ..TransportConfig::default()
+    };
+    let mut swarm = MdrnSwarm::new(keypair.clone(), swarm_config)
+        .map_err(|e| anyhow::anyhow!("Failed to create swarm: {}", e))?;
+
+    // Store announcement in DHT
+    let dht_key = format!(
+        "{}{}",
+        DHT_STREAM_NAMESPACE,
+        hex::encode(&broadcast_result.announcement.stream_addr)
+    );
+    let mut announcement_cbor = Vec::new();
+    ciborium::into_writer(&broadcast_result.announcement, &mut announcement_cbor)?;
+    
+    swarm
+        .dht_put(dht_key.as_bytes().to_vec(), announcement_cbor)
+        .map_err(|e| anyhow::anyhow!("Failed to store announcement in DHT: {}", e))?;
+    
+    tracing::info!("Stored announcement in DHT: {}", dht_key);
+
+    // Subscribe to stream topic
+    let topic = stream_topic(&broadcast_result.announcement.stream_addr);
+    swarm
+        .subscribe(&topic)
+        .map_err(|e| anyhow::anyhow!("Failed to subscribe to topic: {}", e))?;
+    
+    tracing::info!("Subscribed to topic: {}", topic);
+
+    // Publish chunks with real-time pacing (20ms between chunks)
+    let mut chunks_published = 0;
+    for chunk in &broadcast_result.chunks {
+        let mut chunk_cbor = Vec::new();
+        ciborium::into_writer(chunk, &mut chunk_cbor)?;
+        
+        // Note: publish may fail without connected peers (gossipsub limitation)
+        // In a real deployment, we'd need peers connected first
+        match swarm.publish(&topic, chunk_cbor) {
+            Ok(_) => {
+                chunks_published += 1;
+                tracing::debug!("Published chunk {}", chunk.seq);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to publish chunk {}: {}", chunk.seq, e);
+                // Continue trying to publish remaining chunks
+            }
+        }
+
+        // Real-time pacing: 20ms between chunks
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    tracing::info!("Published {} chunks to network", chunks_published);
+
+    Ok(NetworkBroadcastResult {
+        announcement: broadcast_result.announcement,
+        chunks_published,
+        announcement_stored: true,
+    })
+}
