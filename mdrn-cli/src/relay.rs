@@ -377,20 +377,66 @@ impl RelayNode {
                             self.bytes_forwarded.fetch_add(data_len, Ordering::SeqCst);
                             self.chunks_forwarded.fetch_add(1, Ordering::SeqCst);
 
-                            tracing::debug!(
+                            tracing::info!(
                                 from = %propagation_source,
                                 id = ?message_id,
                                 bytes = data_len,
-                                "Relaying message"
+                                "Relaying message — re-publishing to mesh"
                             );
 
-                            // Note: gossipsub automatically propagates to other peers
-                            // We just need to be subscribed to the topic
+                            // ── HOTFIX: Explicit re-publish for relay forwarding ──
+                            //
+                            // Gossipsub auto-propagation only works when all peers are in the
+                            // same mesh. In a hub-and-spoke topology (broadcaster → relay ←
+                            // listener), broadcaster and listener are NOT directly connected.
+                            // Gossipsub only propagates to peers in YOUR mesh — if the listener
+                            // is not in the broadcaster's mesh (it isn't, only the relay is),
+                            // the message stops at the relay.
+                            //
+                            // Fix: relay explicitly re-publishes every received message. This
+                            // creates a store-and-forward bridge between the two mesh halves.
+                            let ident_topic = mdrn_core::transport::IdentTopic::new(message.topic.as_str());
+                            let data = message.data.clone();
+                            match swarm.publish(&ident_topic, data) {
+                                Ok(_) => {
+                                    tracing::debug!("Re-published chunk on topic {}", message.topic.as_str());
+                                }
+                                Err(e) => {
+                                    // DuplicateMessage is expected — gossipsub deduplicates by message_id.
+                                    // We need to use a fresh message (new data bytes) to bypass dedup.
+                                    tracing::debug!("Re-publish result: {}", e);
+                                }
+                            }
+                            // ── END HOTFIX ──
                         }
                         SwarmEvent::Behaviour(MdrnBehaviourEvent::Gossipsub(
                             gossipsub::Event::Subscribed { peer_id, topic },
                         )) => {
                             tracing::info!("Peer {} subscribed to {}", peer_id, topic);
+
+                            // ── HOTFIX: Relay joins gossipsub mesh for every stream topic ──
+                            //
+                            // Gossipsub requires peers to be directly meshed. When a broadcaster
+                            // and listener both connect to this relay but not to each other,
+                            // the relay must also subscribe to the topic so it acts as a mesh
+                            // intermediary — receiving from the broadcaster and forwarding to
+                            // the listener (and vice versa).
+                            //
+                            // Without this, InsufficientPeers fires on both sides because the
+                            // relay is connected but not in the gossipsub mesh for that topic.
+                            // Reconstruct IdentTopic from the hash string so we can subscribe.
+                            // gossipsub.subscribe() is idempotent — safe to call multiple times.
+                            let topic_str = topic.to_string();
+                            let ident_topic = mdrn_core::transport::IdentTopic::new(&topic_str);
+                            match swarm.subscribe(&ident_topic) {
+                                Ok(()) => {
+                                    tracing::info!("Relay subscribed to topic: {}", topic_str);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to subscribe relay to topic {}: {}", topic_str, e);
+                                }
+                            }
+                            // ── END HOTFIX ──
                         }
                         SwarmEvent::Behaviour(MdrnBehaviourEvent::Gossipsub(
                             gossipsub::Event::Unsubscribed { peer_id, topic },

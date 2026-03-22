@@ -358,7 +358,7 @@ pub async fn broadcast_to_network(
     config: &BroadcastConfig<'_>,
     relay_addr: Option<String>,
 ) -> Result<NetworkBroadcastResult> {
-    use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE};
+    use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE, MdrnBehaviourEvent};
     use std::time::Duration;
     use tokio::time::sleep;
     use futures::StreamExt;
@@ -395,34 +395,43 @@ pub async fn broadcast_to_network(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to dial relay: {}", e))?;
 
-    // Wait for connection to be established
+    // ── HOTFIX: Wait for Identify before DHT/subscribe (same fix as listen.rs) ──
+    // ConnectionEstablished fires before multistream-select negotiates gossipsub.
+    // Waiting for identify::Event::Received ensures all protocols are ready.
     let mut connected = false;
-    let connect_timeout = Duration::from_secs(10);
+    let mut protocols_ready = false;
+    let connect_timeout = Duration::from_secs(15);
     let start_time = std::time::Instant::now();
 
-    while !connected && start_time.elapsed() < connect_timeout {
-        match tokio::time::timeout(Duration::from_millis(100), swarm.inner_mut().select_next_some()).await {
+    while (!connected || !protocols_ready) && start_time.elapsed() < connect_timeout {
+        match tokio::time::timeout(Duration::from_millis(200), swarm.inner_mut().select_next_some()).await {
             Ok(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                 tracing::info!("Connected to relay peer: {}", peer_id);
                 connected = true;
             }
+            Ok(SwarmEvent::Behaviour(MdrnBehaviourEvent::Identify(
+                libp2p::identify::Event::Received { peer_id, .. }
+            ))) => {
+                tracing::info!("Protocol negotiation complete with relay: {}", peer_id);
+                protocols_ready = true;
+            }
             Ok(SwarmEvent::OutgoingConnectionError { error, .. }) => {
                 anyhow::bail!("Failed to connect to relay: {}", error);
             }
-            Ok(_) => {
-                // Other events, continue waiting
-            }
-            Err(_) => {
-                // Timeout on individual select, continue
-            }
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
 
     if !connected {
         anyhow::bail!("Timeout connecting to relay after {}s", connect_timeout.as_secs());
     }
+    if !protocols_ready {
+        tracing::warn!("Identify not received — proceeding anyway");
+    }
+    // ── END HOTFIX ──
 
-    // Now that we're connected, proceed with DHT and gossipsub
+    // Now that protocols are ready, proceed with DHT and gossipsub
 
     // Store announcement in DHT
     let dht_key = format!(
@@ -447,6 +456,49 @@ pub async fn broadcast_to_network(
 
     tracing::info!("Subscribed to topic: {}", topic);
 
+    // ── HOTFIX: Wait for at least one mesh peer to subscribe before publishing ──
+    //
+    // Gossipsub requires direct peer-to-peer mesh connections. When the broadcaster
+    // and listener both connect to the same relay, they are NOT automatically meshed —
+    // gossipsub needs to discover each other and form a direct connection. Publishing
+    // immediately after subscribing results in InsufficientPeers errors.
+    //
+    // Fix: poll swarm events until we see a GossipsubEvent::Subscribed from another
+    // peer on our stream topic (meaning they joined the mesh), then publish.
+    // 15-second timeout with a fallback to publish anyway (for single-node demos).
+    {
+        use mdrn_core::transport::MdrnBehaviourEvent;
+        use libp2p::gossipsub;
+
+        tracing::info!("Waiting for listener to join gossipsub mesh (up to 15s)...");
+        let topic_str = topic.to_string();
+        let mesh_wait = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match swarm.inner_mut().select_next_some().await {
+                    SwarmEvent::Behaviour(MdrnBehaviourEvent::Gossipsub(
+                        gossipsub::Event::Subscribed { peer_id, topic }
+                    )) => {
+                        tracing::info!("Peer {} joined mesh on topic {}", peer_id, topic);
+                        break;
+                    }
+                    SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                        tracing::debug!("New connection from {}", peer_id);
+                    }
+                    _ => {}
+                }
+            }
+        }).await;
+
+        match mesh_wait {
+            Ok(_) => tracing::info!("Mesh peer found — starting broadcast"),
+            Err(_) => tracing::warn!(
+                "No listener joined mesh after 15s on topic {} — broadcasting anyway (no subscribers will receive)",
+                topic_str
+            ),
+        }
+    }
+    // ── END HOTFIX ──
+
     // Publish chunks with real-time pacing (20ms between chunks)
     let mut chunks_published = 0;
     for chunk in &broadcast_result.chunks {
@@ -470,6 +522,26 @@ pub async fn broadcast_to_network(
     }
 
     tracing::info!("Published {} chunks to network", chunks_published);
+
+    // ── HOTFIX: Drain period — keep event loop alive after publishing ──
+    //
+    // Gossipsub is async: publish() queues messages but delivery happens in the
+    // background event loop. If the process exits immediately after the publish
+    // loop, all queued messages are dropped before they reach the relay.
+    //
+    // Fix: continue draining the swarm event loop for 5 seconds after the last
+    // chunk is published. This gives gossipsub time to flush its send queue and
+    // confirm delivery to all mesh peers.
+    tracing::info!("Draining gossipsub queue (5s)...");
+    let drain_start = std::time::Instant::now();
+    while drain_start.elapsed() < Duration::from_secs(5) {
+        tokio::select! {
+            _ = swarm.inner_mut().select_next_some() => {}
+            _ = sleep(Duration::from_millis(50)) => {}
+        }
+    }
+    tracing::info!("Drain complete");
+    // ── END HOTFIX ──
 
     Ok(NetworkBroadcastResult {
         announcement: broadcast_result.announcement,

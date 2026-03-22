@@ -86,7 +86,11 @@ impl MdrnSwarm {
                 yamux::Config::default,
             )
             .map_err(|e| SwarmError::CreationFailed(e.to_string()))?
-            .with_quic()
+            // HOTFIX: QUIC disabled — when both TCP and QUIC are enabled, libp2p probes both
+            // transports. The QUIC probe often fails fast (300µs) and fires ConnectionClosed,
+            // confusing gossipsub mesh state even though TCP is still open. TCP-only is simpler
+            // and sufficient for Phase 1 single-relay demo.
+            // .with_quic()
             .with_behaviour(|key| {
                 // Configure Kademlia DHT
                 let store = MemoryStore::new(key.public().to_peer_id());

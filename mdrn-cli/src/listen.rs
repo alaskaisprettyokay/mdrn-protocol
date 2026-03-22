@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use mdrn_core::crypto;
 use mdrn_core::stream::{Chunk, StreamAnnouncement};
-use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE};
+use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE, MdrnBehaviourEvent};
 
 /// Configuration for listen operation
 pub struct ListenConfig {
@@ -239,34 +239,50 @@ pub async fn run_listen_network(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to dial relay: {}", e))?;
 
-    // Wait for connection to be established
+    // ── HOTFIX: Wait for Identify (not just ConnectionEstablished) before subscribing ──
+    //
+    // ConnectionEstablished fires when TCP handshake completes, but gossipsub protocol
+    // negotiation (multistream-select + yamux) is still in progress. Calling subscribe()
+    // immediately after ConnectionEstablished causes the subscription message to be
+    // silently dropped because the gossipsub stream doesn't exist yet.
+    //
+    // Fix: wait for identify::Event::Received, which only fires after all protocols have
+    // been negotiated and the peer info exchange is complete. Only THEN subscribe.
+    // This ensures gossipsub is ready to accept our subscription.
     let mut connected = false;
-    let connect_timeout = Duration::from_secs(10);
+    let mut protocols_ready = false;
+    let connect_timeout = Duration::from_secs(15);
     let start_time = std::time::Instant::now();
 
-    while !connected && start_time.elapsed() < connect_timeout {
-        match tokio::time::timeout(Duration::from_millis(100), swarm.inner_mut().select_next_some()).await {
+    while (!connected || !protocols_ready) && start_time.elapsed() < connect_timeout {
+        match tokio::time::timeout(Duration::from_millis(200), swarm.inner_mut().select_next_some()).await {
             Ok(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
                 tracing::info!("Connected to relay peer: {}", peer_id);
                 connected = true;
             }
+            Ok(SwarmEvent::Behaviour(MdrnBehaviourEvent::Identify(
+                libp2p::identify::Event::Received { peer_id, .. }
+            ))) => {
+                tracing::info!("Protocol negotiation complete with relay: {}", peer_id);
+                protocols_ready = true;
+            }
             Ok(SwarmEvent::OutgoingConnectionError { error, .. }) => {
                 anyhow::bail!("Failed to connect to relay: {}", error);
             }
-            Ok(_) => {
-                // Other events, continue waiting
-            }
-            Err(_) => {
-                // Timeout on individual select, continue
-            }
+            Ok(_) => {}
+            Err(_) => {}
         }
     }
 
     if !connected {
         anyhow::bail!("Timeout connecting to relay after {}s", connect_timeout.as_secs());
     }
+    if !protocols_ready {
+        tracing::warn!("Identify not received — subscribing anyway (protocols may not be ready)");
+    }
+    // ── END HOTFIX ──
 
-    // Now that we're connected, subscribe to the topic
+    // Now that protocols are negotiated, subscribe to the topic
     let topic = stream_topic(&config.stream_addr);
     swarm
         .subscribe(&topic)
@@ -295,7 +311,12 @@ pub async fn run_listen_network(
     let mut chunks_decoded = 0;
 
     // Listen for chunks with timeout
-    let listen_duration = Duration::from_secs(10); // Listen for 10 seconds
+    // HOTFIX: Extended from 10s to 60s — the listener must stay alive long enough
+    // for the broadcaster to connect, form a mesh with the relay, and publish all chunks.
+    // At 20ms/chunk × 250 chunks = 5s of audio + relay/mesh formation time (~15s worst case).
+    // In production this would be infinite (stream runs until cancelled), but 60s
+    // covers a full Phase 1 demo run end-to-end without ctrl-C management.
+    let listen_duration = Duration::from_secs(60);
     let start = std::time::Instant::now();
 
     while start.elapsed() < listen_duration {
