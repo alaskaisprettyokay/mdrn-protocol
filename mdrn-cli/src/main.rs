@@ -47,6 +47,10 @@ enum Commands {
         /// Broadcast to libp2p network (vs stdout mode)
         #[arg(short, long)]
         network: bool,
+
+        /// Relay node address to connect to (e.g. /ip4/127.0.0.1/tcp/9000)
+        #[arg(short, long)]
+        relay: Option<String>,
     },
 
     /// Listen to a stream
@@ -66,6 +70,10 @@ enum Commands {
         /// Listen via libp2p network (vs stdin mode)
         #[arg(short, long)]
         network: bool,
+
+        /// Relay node address to connect to (e.g. /ip4/127.0.0.1/tcp/9000)
+        #[arg(short, long)]
+        relay: Option<String>,
     },
 
     /// Run as a relay node
@@ -138,6 +146,7 @@ fn main() -> Result<()> {
             bitrate,
             encrypted,
             network,
+            relay,
         } => {
             use broadcast::{load_keypair_default, load_vouch_default, run_broadcast, BroadcastConfig};
 
@@ -187,7 +196,7 @@ fn main() -> Result<()> {
                 use broadcast::broadcast_to_network;
 
                 let rt = tokio::runtime::Runtime::new()?;
-                let result = rt.block_on(broadcast_to_network(&keypair, &vouch, &config))?;
+                let result = rt.block_on(broadcast_to_network(&keypair, &vouch, &config, relay))?;
 
                 println!("\n=== Network Broadcast Complete ===");
                 println!("Stream ID: {}", stream_id);
@@ -235,7 +244,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Listen { stream, output, key, network } => {
+        Commands::Listen { stream, output, key, network, relay } => {
             use listen::{parse_stream_address, run_listen_stdin, ListenConfig, ParsedAddress};
 
             tracing::info!(
@@ -285,7 +294,7 @@ fn main() -> Result<()> {
                 use listen::run_listen_network;
 
                 let rt = tokio::runtime::Runtime::new()?;
-                let result = rt.block_on(run_listen_network(&config, None))?;
+                let result = rt.block_on(run_listen_network(&config, None, relay))?;
 
                 println!("\n=== Listen Complete ===");
                 println!("Stream Address: {}", hex::encode(&config.stream_addr));

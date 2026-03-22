@@ -356,10 +356,13 @@ pub async fn broadcast_to_network(
     keypair: &Keypair,
     vouch: &Vouch,
     config: &BroadcastConfig<'_>,
+    relay_addr: Option<String>,
 ) -> Result<NetworkBroadcastResult> {
     use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE};
     use std::time::Duration;
     use tokio::time::sleep;
+    use futures::StreamExt;
+    use libp2p::swarm::SwarmEvent;
 
     // First, process audio using existing pipeline
     let broadcast_result = run_broadcast(keypair, vouch, config)?;
@@ -373,6 +376,54 @@ pub async fn broadcast_to_network(
     let mut swarm = MdrnSwarm::new(keypair.clone(), swarm_config)
         .map_err(|e| anyhow::anyhow!("Failed to create swarm: {}", e))?;
 
+    // Start listening for incoming connections
+    swarm.listen("/ip4/127.0.0.1/tcp/0".parse()?)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start listening: {}", e))?;
+
+    tracing::info!("Broadcaster listening for connections");
+
+    // Connect to relay node
+    let relay_address = relay_addr
+        .or_else(|| std::env::var("MDRN_RELAY").ok())
+        .unwrap_or_else(|| "/ip4/127.0.0.1/tcp/9000".to_string());
+    let relay_multiaddr: libp2p::Multiaddr = relay_address.parse()
+        .map_err(|e| anyhow::anyhow!("Invalid relay address '{}': {}", relay_address, e))?;
+
+    tracing::info!("Connecting to relay: {}", relay_multiaddr);
+    swarm.dial(relay_multiaddr.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to dial relay: {}", e))?;
+
+    // Wait for connection to be established
+    let mut connected = false;
+    let connect_timeout = Duration::from_secs(10);
+    let start_time = std::time::Instant::now();
+
+    while !connected && start_time.elapsed() < connect_timeout {
+        match tokio::time::timeout(Duration::from_millis(100), swarm.inner_mut().select_next_some()).await {
+            Ok(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                tracing::info!("Connected to relay peer: {}", peer_id);
+                connected = true;
+            }
+            Ok(SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                anyhow::bail!("Failed to connect to relay: {}", error);
+            }
+            Ok(_) => {
+                // Other events, continue waiting
+            }
+            Err(_) => {
+                // Timeout on individual select, continue
+            }
+        }
+    }
+
+    if !connected {
+        anyhow::bail!("Timeout connecting to relay after {}s", connect_timeout.as_secs());
+    }
+
+    // Now that we're connected, proceed with DHT and gossipsub
+
     // Store announcement in DHT
     let dht_key = format!(
         "{}{}",
@@ -381,11 +432,11 @@ pub async fn broadcast_to_network(
     );
     let mut announcement_cbor = Vec::new();
     ciborium::into_writer(&broadcast_result.announcement, &mut announcement_cbor)?;
-    
+
     swarm
         .dht_put(dht_key.as_bytes().to_vec(), announcement_cbor)
         .map_err(|e| anyhow::anyhow!("Failed to store announcement in DHT: {}", e))?;
-    
+
     tracing::info!("Stored announcement in DHT: {}", dht_key);
 
     // Subscribe to stream topic
@@ -393,7 +444,7 @@ pub async fn broadcast_to_network(
     swarm
         .subscribe(&topic)
         .map_err(|e| anyhow::anyhow!("Failed to subscribe to topic: {}", e))?;
-    
+
     tracing::info!("Subscribed to topic: {}", topic);
 
     // Publish chunks with real-time pacing (20ms between chunks)
@@ -401,9 +452,8 @@ pub async fn broadcast_to_network(
     for chunk in &broadcast_result.chunks {
         let mut chunk_cbor = Vec::new();
         ciborium::into_writer(chunk, &mut chunk_cbor)?;
-        
-        // Note: publish may fail without connected peers (gossipsub limitation)
-        // In a real deployment, we'd need peers connected first
+
+        // Publish to connected relay peers
         match swarm.publish(&topic, chunk_cbor) {
             Ok(_) => {
                 chunks_published += 1;

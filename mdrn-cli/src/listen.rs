@@ -192,6 +192,7 @@ pub fn run_listen_stdin(config: &ListenConfig) -> Result<ListenResult> {
 pub async fn run_listen_network(
     config: &ListenConfig,
     announcement: Option<StreamAnnouncement>,
+    relay_addr: Option<String>,
 ) -> Result<ListenResult> {
     use futures::StreamExt;
     use libp2p::swarm::SwarmEvent;
@@ -219,7 +220,53 @@ pub async fn run_listen_network(
     let mut swarm = MdrnSwarm::new(keypair, swarm_config)
         .map_err(|e| anyhow::anyhow!("Failed to create swarm: {}", e))?;
 
-    // Subscribe to stream topic
+    // Start listening for incoming connections
+    swarm.listen("/ip4/127.0.0.1/tcp/0".parse()?)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to start listening: {}", e))?;
+
+    tracing::info!("Listener listening for connections");
+
+    // Connect to relay node
+    let relay_address = relay_addr
+        .or_else(|| std::env::var("MDRN_RELAY").ok())
+        .unwrap_or_else(|| "/ip4/127.0.0.1/tcp/9000".to_string());
+    let relay_multiaddr: libp2p::Multiaddr = relay_address.parse()
+        .map_err(|e| anyhow::anyhow!("Invalid relay address '{}': {}", relay_address, e))?;
+
+    tracing::info!("Connecting to relay: {}", relay_multiaddr);
+    swarm.dial(relay_multiaddr.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to dial relay: {}", e))?;
+
+    // Wait for connection to be established
+    let mut connected = false;
+    let connect_timeout = Duration::from_secs(10);
+    let start_time = std::time::Instant::now();
+
+    while !connected && start_time.elapsed() < connect_timeout {
+        match tokio::time::timeout(Duration::from_millis(100), swarm.inner_mut().select_next_some()).await {
+            Ok(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                tracing::info!("Connected to relay peer: {}", peer_id);
+                connected = true;
+            }
+            Ok(SwarmEvent::OutgoingConnectionError { error, .. }) => {
+                anyhow::bail!("Failed to connect to relay: {}", error);
+            }
+            Ok(_) => {
+                // Other events, continue waiting
+            }
+            Err(_) => {
+                // Timeout on individual select, continue
+            }
+        }
+    }
+
+    if !connected {
+        anyhow::bail!("Timeout connecting to relay after {}s", connect_timeout.as_secs());
+    }
+
+    // Now that we're connected, subscribe to the topic
     let topic = stream_topic(&config.stream_addr);
     swarm
         .subscribe(&topic)
