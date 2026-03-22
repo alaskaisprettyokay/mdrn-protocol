@@ -7,6 +7,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod broadcast;
+pub mod discover;
+mod listen;
+pub mod relay;
 
 #[derive(Parser)]
 #[command(name = "mdrn")]
@@ -52,9 +55,17 @@ enum Commands {
         #[arg()]
         stream: String,
 
-        /// Audio output device
+        /// Output WAV file path (or audio device)
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Stream key for encrypted streams (hex)
+        #[arg(short, long)]
+        key: Option<String>,
+
+        /// Listen via libp2p network (vs stdin mode)
+        #[arg(short, long)]
+        network: bool,
     },
 
     /// Run as a relay node
@@ -115,7 +126,10 @@ fn main() -> Result<()> {
     } else {
         EnvFilter::new("info")
     };
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 
     match cli.command {
         Commands::Broadcast {
@@ -221,14 +235,79 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Listen { stream, output } => {
+        Commands::Listen { stream, output, key, network } => {
+            use listen::{parse_stream_address, run_listen_stdin, ListenConfig, ParsedAddress};
+
             tracing::info!(
                 stream = %stream,
                 output = ?output,
+                network = network,
                 "Connecting to stream..."
             );
-            // TODO: Implement listen
-            tracing::warn!("Listen not yet implemented");
+
+            // Parse stream address
+            let stream_addr = match parse_stream_address(&stream)? {
+                ParsedAddress::Hex(addr) => addr,
+                ParsedAddress::StreamId(_id) => {
+                    // For MVP, stream_id lookup requires DHT which requires network mode
+                    anyhow::bail!(
+                        "Stream ID lookup not implemented yet. Please use hex address.\n\
+                         Hint: The stream address is SHA-256(broadcaster_identity || stream_id)"
+                    );
+                }
+            };
+
+            // Parse stream key if provided
+            let stream_key = if let Some(key_hex) = key {
+                let key_bytes = hex::decode(&key_hex)
+                    .map_err(|e| anyhow::anyhow!("Invalid stream key hex: {}", e))?;
+                if key_bytes.len() != 32 {
+                    anyhow::bail!("Stream key must be 32 bytes (64 hex chars)");
+                }
+                let mut key_array = [0u8; 32];
+                key_array.copy_from_slice(&key_bytes);
+                Some(key_array)
+            } else {
+                None
+            };
+
+            let output_path = output.map(PathBuf::from);
+
+            let config = ListenConfig {
+                stream_addr,
+                output_path: output_path.clone(),
+                stream_key,
+                network,
+            };
+
+            if network {
+                // Network mode: subscribe to gossipsub topic
+                use listen::run_listen_network;
+
+                let rt = tokio::runtime::Runtime::new()?;
+                let result = rt.block_on(run_listen_network(&config, None))?;
+
+                println!("\n=== Listen Complete ===");
+                println!("Stream Address: {}", hex::encode(&config.stream_addr));
+                println!("Chunks Received: {}", result.chunks_received);
+                println!("Chunks Decoded: {}", result.chunks_decoded);
+                println!("Duration: {} ms", result.duration_ms);
+                if let Some(path) = result.output_path {
+                    println!("Output: {}", path.display());
+                }
+            } else {
+                // Stdin mode: read hex-encoded CBOR chunks from stdin
+                let result = run_listen_stdin(&config)?;
+
+                println!("\n=== Listen Complete ===");
+                println!("Stream Address: {}", hex::encode(&config.stream_addr));
+                println!("Chunks Received: {}", result.chunks_received);
+                println!("Chunks Decoded: {}", result.chunks_decoded);
+                println!("Duration: {} ms", result.duration_ms);
+                if let Some(path) = result.output_path {
+                    println!("Output: {}", path.display());
+                }
+            }
         }
 
         Commands::Relay { port, price } => {
@@ -237,8 +316,15 @@ fn main() -> Result<()> {
                 price = price,
                 "Starting relay node..."
             );
-            // TODO: Implement relay
-            tracing::warn!("Relay not yet implemented");
+
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async {
+                if let Err(e) = relay::run_relay(port, price).await {
+                    tracing::error!("Relay error: {}", e);
+                    anyhow::bail!("Relay failed: {}", e);
+                }
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
 
         Commands::Discover { tag, limit } => {
@@ -247,8 +333,26 @@ fn main() -> Result<()> {
                 limit = limit,
                 "Discovering streams..."
             );
-            // TODO: Implement discovery
-            tracing::warn!("Discovery not yet implemented");
+
+            use discover::{run_discover, format_discover_output, DiscoverConfig};
+
+            let config = DiscoverConfig {
+                limit,
+                tag,
+                timeout_secs: 10,
+            };
+
+            let rt = tokio::runtime::Runtime::new()?;
+            let result = rt.block_on(run_discover(None, &config))?;
+
+            // Print formatted output
+            println!("{}", format_discover_output(&result));
+
+            // Print additional info
+            if result.total_found > 0 {
+                println!("\nTo listen to a stream, use:");
+                println!("  mdrn listen <stream-address> --network");
+            }
         }
 
         Commands::Keygen { key_type, output } => {
@@ -257,8 +361,50 @@ fn main() -> Result<()> {
                 output = ?output,
                 "Generating keypair..."
             );
-            // TODO: Implement keygen
-            tracing::warn!("Keygen not yet implemented");
+
+            // Generate keypair based on key type
+            let keypair = match key_type.to_lowercase().as_str() {
+                "ed25519" => mdrn_core::identity::Keypair::generate_ed25519()
+                    .map_err(|e| anyhow::anyhow!("Failed to generate Ed25519 keypair: {}", e))?,
+                "secp256k1" => mdrn_core::identity::Keypair::generate_secp256k1()
+                    .map_err(|e| anyhow::anyhow!("Failed to generate secp256k1 keypair: {}", e))?,
+                other => anyhow::bail!("Unsupported key type: '{}'. Use 'ed25519' or 'secp256k1'.", other),
+            };
+
+            // Determine output path
+            let output_path = match output {
+                Some(path) => PathBuf::from(path),
+                None => {
+                    // Default to ~/.mdrn/keypair.cbor
+                    let home = std::env::var("HOME")
+                        .map_err(|_| anyhow::anyhow!("HOME environment variable not set"))?;
+                    let mdrn_dir = PathBuf::from(home).join(".mdrn");
+                    mdrn_dir.join("keypair.cbor")
+                }
+            };
+
+            // Create parent directory if needed
+            if let Some(parent) = output_path.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow::anyhow!("Failed to create directory {}: {}", parent.display(), e))?;
+                }
+            }
+
+            // Serialize to CBOR
+            let cbor_data = keypair.to_cbor()
+                .map_err(|e| anyhow::anyhow!("Failed to serialize keypair: {}", e))?;
+
+            // Write to file
+            std::fs::write(&output_path, &cbor_data)
+                .map_err(|e| anyhow::anyhow!("Failed to write keypair to {}: {}", output_path.display(), e))?;
+
+            // Output identity
+            let identity_hex = hex::encode(keypair.identity().as_bytes());
+            println!("Keypair generated successfully!");
+            println!("Key type: {:?}", keypair.key_type());
+            println!("Identity: {}", identity_hex);
+            println!("Saved to: {}", output_path.display());
         }
 
         Commands::Vouch {
@@ -272,8 +418,51 @@ fn main() -> Result<()> {
                 expires = ?expires,
                 "Creating vouch..."
             );
-            // TODO: Implement vouch creation
-            tracing::warn!("Vouch creation not yet implemented");
+
+            // Parse subject identity from hex
+            let subject_bytes = hex::decode(&subject)
+                .map_err(|e| anyhow::anyhow!("Invalid subject hex: {}", e))?;
+            let subject_identity = mdrn_core::identity::Identity::from_bytes(&subject_bytes)
+                .map_err(|e| anyhow::anyhow!("Invalid subject identity: {}", e))?;
+
+            // Load issuer keypair from file
+            let keypair_path = PathBuf::from(&keypair);
+            let keypair_data = std::fs::read(&keypair_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read keypair file {}: {}", keypair_path.display(), e))?;
+            let issuer_keypair = mdrn_core::identity::Keypair::from_cbor(&keypair_data)
+                .map_err(|e| anyhow::anyhow!("Failed to parse keypair: {}", e))?;
+
+            // Calculate expiration timestamp if provided
+            let expires_at = expires.map(|days| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                now + (days * 24 * 60 * 60)
+            });
+
+            // Create the vouch
+            let vouch = mdrn_core::identity::Vouch::create(
+                subject_identity,
+                &issuer_keypair,
+                expires_at,
+            ).map_err(|e| anyhow::anyhow!("Failed to create vouch: {}", e))?;
+
+            // Verify the vouch before outputting
+            vouch.verify()
+                .map_err(|e| anyhow::anyhow!("Vouch verification failed: {}", e))?;
+
+            // Serialize to CBOR and write to stdout
+            let mut cbor_data = Vec::new();
+            ciborium::into_writer(&vouch, &mut cbor_data)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize vouch: {}", e))?;
+
+            // Write raw CBOR bytes to stdout
+            use std::io::Write;
+            std::io::stdout().write_all(&cbor_data)
+                .map_err(|e| anyhow::anyhow!("Failed to write vouch: {}", e))?;
+
+            tracing::info!("Vouch created successfully");
         }
     }
 

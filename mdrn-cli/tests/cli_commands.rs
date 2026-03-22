@@ -38,10 +38,10 @@ fn test_keygen_ed25519_default() {
 
     // Verify the keypair can be deserialized
     let contents = std::fs::read(&keypair_path).unwrap();
-    let keypair: mdrn_core::identity::StoredKeypair =
-        ciborium::from_reader(&contents[..]).expect("Failed to deserialize keypair");
+    let keypair = mdrn_core::identity::Keypair::from_cbor(&contents)
+        .expect("Failed to deserialize keypair");
 
-    assert_eq!(keypair.key_type, mdrn_core::identity::KeyType::Ed25519);
+    assert_eq!(keypair.key_type(), mdrn_core::identity::KeyType::Ed25519);
 }
 
 #[test]
@@ -58,10 +58,97 @@ fn test_keygen_secp256k1() {
     assert!(output.status.success());
 
     let contents = std::fs::read(&keypair_path).unwrap();
-    let keypair: mdrn_core::identity::StoredKeypair =
-        ciborium::from_reader(&contents[..]).expect("Failed to deserialize keypair");
+    let keypair = mdrn_core::identity::Keypair::from_cbor(&contents)
+        .expect("Failed to deserialize keypair");
 
-    assert_eq!(keypair.key_type, mdrn_core::identity::KeyType::Secp256k1);
+    assert_eq!(keypair.key_type(), mdrn_core::identity::KeyType::Secp256k1);
+}
+
+#[test]
+fn test_keygen_invalid_key_type() {
+    let temp_dir = TempDir::new().unwrap();
+    let keypair_path = temp_dir.path().join("invalid.key");
+
+    let output = run_mdrn(&[
+        "keygen",
+        "-k", "rsa",  // Invalid key type
+        "-o", keypair_path.to_str().unwrap()
+    ]);
+
+    // Command should fail
+    assert!(!output.status.success(), "keygen should fail for invalid key type");
+
+    // File should NOT be created
+    assert!(!keypair_path.exists(), "keypair file should not be created for invalid key type");
+
+    // Error message should mention the invalid key type
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rsa") || stderr.contains("Unsupported key type"),
+        "error should mention invalid key type: {}", stderr
+    );
+}
+
+#[test]
+fn test_keygen_creates_parent_directory() {
+    let temp_dir = TempDir::new().unwrap();
+    let nested_path = temp_dir.path().join("nested").join("dirs").join("keypair.cbor");
+
+    // Parent directories don't exist yet
+    assert!(!nested_path.parent().unwrap().exists());
+
+    let output = run_mdrn(&["keygen", "-o", nested_path.to_str().unwrap()]);
+
+    assert!(output.status.success(), "keygen failed: {:?}", String::from_utf8_lossy(&output.stderr));
+    assert!(nested_path.exists(), "keypair file was not created");
+
+    // Verify keypair is valid
+    let contents = std::fs::read(&nested_path).unwrap();
+    let keypair = mdrn_core::identity::Keypair::from_cbor(&contents)
+        .expect("Failed to deserialize keypair");
+    assert_eq!(keypair.key_type(), mdrn_core::identity::KeyType::Ed25519);
+}
+
+#[test]
+fn test_keygen_output_shows_identity() {
+    let temp_dir = TempDir::new().unwrap();
+    let keypair_path = temp_dir.path().join("test.key");
+
+    let output = run_mdrn(&["keygen", "-o", keypair_path.to_str().unwrap()]);
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should show identity hex
+    assert!(stdout.contains("Identity:"), "output should show identity");
+
+    // Should confirm save location
+    assert!(stdout.contains("Saved to:"), "output should show save location");
+
+    // Should show key type
+    assert!(stdout.contains("Ed25519"), "output should show key type");
+}
+
+#[test]
+fn test_keygen_keypair_can_sign_and_verify() {
+    let temp_dir = TempDir::new().unwrap();
+    let keypair_path = temp_dir.path().join("signing.key");
+
+    let output = run_mdrn(&["keygen", "-o", keypair_path.to_str().unwrap()]);
+    assert!(output.status.success());
+
+    // Load the keypair
+    let contents = std::fs::read(&keypair_path).unwrap();
+    let keypair = mdrn_core::identity::Keypair::from_cbor(&contents).unwrap();
+
+    // Sign a message
+    let message = b"test message for signing";
+    let signature = keypair.sign(message);
+
+    // Verify the signature
+    let result = keypair.identity().verify(message, &signature);
+    assert!(result.is_ok(), "signature verification failed");
 }
 
 #[test]
@@ -80,9 +167,9 @@ fn test_vouch_creates_credential() {
 
     // Read subject keypair to get identity hex
     let subject_bytes = std::fs::read(&subject_path).unwrap();
-    let subject_keypair: mdrn_core::identity::StoredKeypair =
-        ciborium::from_reader(&subject_bytes[..]).unwrap();
-    let subject_hex = hex::encode(subject_keypair.identity_bytes);
+    let subject_keypair = mdrn_core::identity::Keypair::from_cbor(&subject_bytes)
+        .unwrap();
+    let subject_hex = hex::encode(subject_keypair.identity().as_bytes());
 
     // Create vouch - output goes to stdout, redirect via shell
     let output = Command::new("sh")
@@ -121,9 +208,9 @@ fn test_vouch_with_expiration() {
     run_mdrn(&["keygen", "-o", subject_path.to_str().unwrap()]);
 
     let subject_bytes = std::fs::read(&subject_path).unwrap();
-    let subject_keypair: mdrn_core::identity::StoredKeypair =
-        ciborium::from_reader(&subject_bytes[..]).unwrap();
-    let subject_hex = hex::encode(subject_keypair.identity_bytes);
+    let subject_keypair = mdrn_core::identity::Keypair::from_cbor(&subject_bytes)
+        .unwrap();
+    let subject_hex = hex::encode(subject_keypair.identity().as_bytes());
 
     // Create vouch with 30 day expiration
     let output = Command::new("sh")

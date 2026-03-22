@@ -1,0 +1,62 @@
+---
+session: kraken-libp2p-swarm
+date: 2026-03-22
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Implement libp2p network broadcasting with TDD - transform CLI from audio processor to distributed network broadcaster
+now: Implement remaining 5 commands (listen, relay, discover, keygen, vouch) to complete Phase 1 MDRN CLI
+test: cargo test --package mdrn-cli && cargo run --bin mdrn -- broadcast --help | grep -q network
+
+done_this_session:
+  - task: Fixed CBOR serialization methods on Keypair struct
+    files: [mdrn-core/src/identity/keypair.rs]
+  - task: Implemented libp2p network broadcasting with comprehensive TDD test suite
+    files: [mdrn-cli/src/broadcast.rs, mdrn-cli/src/main.rs, mdrn-cli/Cargo.toml]
+  - task: Added --network flag for real libp2p broadcasting vs stdout mode
+    files: [mdrn-cli/src/main.rs:44-46, mdrn-cli/src/broadcast.rs:341-397]
+  - task: Created comprehensive test suite with 30+ tests covering network integration
+    files: [mdrn-cli/tests/network_broadcast_tests.rs, mdrn-cli/tests/broadcast_tests.rs, mdrn-cli/tests/cli_commands.rs, mdrn-cli/tests/listen_command.rs, mdrn-core/tests/network_integration.rs]
+  - task: Added TDD implementation plan and documentation
+    files: [thoughts/shared/plans/tdd-libp2p-broadcast-integration.md]
+
+blockers: []
+
+questions:
+  - Should we implement listen/relay next for end-to-end testing or keygen/vouch for user workflow?
+  - Do we need relay payment handling for Phase 1 or can it be free relaying initially?
+
+decisions:
+  - tdd_approach: Used strict Red-Green-Refactor TDD workflow to ensure network integration works correctly
+  - network_flag: Added --network flag instead of replacing stdout mode to preserve debugging capability
+  - async_integration: Used tokio runtime wrapper to bridge async libp2p operations into sync CLI context
+  - test_artifacts: Excluded temporary audio/key files from commit to keep repo clean
+
+findings:
+  - broadcast command works perfectly for audio processing (Symphonia → Rubato → Opus → Chunks)
+  - MdrnSwarm already provides all needed libp2p primitives (DHT, gossipsub, networking)
+  - Integration gap was bridging async libp2p operations into sync CLI context
+  - TDD caught several edge cases and API mismatches during implementation
+
+worked:
+  - Strict TDD workflow with plan-agent → arbiter → kraken → arbiter validation
+  - Using existing MdrnSwarm instead of reimplementing networking
+  - Preserving existing audio pipeline while adding network layer
+  - Comprehensive test coverage (22 passing tests, 8 appropriately ignored for peer requirements)
+
+failed:
+  - Initially tried to rewrite broadcast.rs completely - TDD forced minimal changes approach which worked better
+  - Some pre-existing integration tests have API drift and need fixing (StoredKeypair vs Keypair issues)
+
+next:
+  - Implement keygen command for identity creation workflow
+  - Implement listen command for DHT discovery and gossipsub subscription
+  - Implement basic relay command for end-to-end testing
+  - Fix pre-existing integration test compilation errors (StoredKeypair references)
+  - Implement discover command for stream browsing
+  - Implement vouch command for trust network bootstrapping
+
+files:
+  created: [mdrn-cli/tests/network_broadcast_tests.rs, mdrn-cli/tests/broadcast_tests.rs, mdrn-cli/tests/cli_commands.rs, mdrn-cli/tests/listen_command.rs, mdrn-core/tests/network_integration.rs, thoughts/shared/plans/tdd-libp2p-broadcast-integration.md]
+  modified: [mdrn-core/src/identity/keypair.rs, mdrn-cli/src/broadcast.rs, mdrn-cli/src/main.rs, mdrn-cli/Cargo.toml]

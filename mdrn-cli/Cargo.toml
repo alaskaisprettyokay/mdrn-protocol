@@ -11,6 +11,10 @@ repository.workspace = true
 name = "mdrn"
 path = "src/main.rs"
 
+[lib]
+name = "mdrn_cli"
+path = "src/lib.rs"
+
 [dependencies]
 mdrn-core.workspace = true
 
@@ -19,6 +23,10 @@ clap.workspace = true
 
 # Async
 tokio.workspace = true
+futures.workspace = true
+
+# Networking (for listen --network mode)
+libp2p.workspace = true
 
 # Logging
 tracing.workspace = true
@@ -26,6 +34,7 @@ tracing-subscriber.workspace = true
 
 # Error handling
 anyhow.workspace = true
+thiserror.workspace = true
 
 # Audio processing
 symphonia.workspace = true

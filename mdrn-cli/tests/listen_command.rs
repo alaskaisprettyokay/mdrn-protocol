@@ -296,16 +296,403 @@ fn test_listen_full_pipeline_with_real_opus() {
     // For MVP, this should at least start and then exit when no input
     // (stdin is not piped so it should exit quickly or wait for input)
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Should show connection attempt or similar
+    // Should show connection attempt or similar (in stderr via tracing or stdout via println)
     assert!(
         stderr.contains("Connecting to stream") ||
         stderr.contains("Listening") ||
         stderr.contains("stream_addr") ||
         stderr.contains("No chunks") ||
+        stdout.contains("Listen Complete") ||
+        stdout.contains("Stream Address") ||
         // Or the not-implemented message if we haven't finished
         stderr.contains("not yet implemented"),
-        "Should show listening status: {}",
+        "Should show listening status: stderr={}, stdout={}",
+        stderr,
+        stdout
+    );
+}
+
+// =============================================================================
+// 6. Encoder/Decoder Roundtrip Tests
+// =============================================================================
+
+#[test]
+fn test_opus_encode_decode_roundtrip() {
+    use opus::{Channels, Encoder, Decoder, Application};
+
+    // Create encoder and decoder
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+    let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
+
+    // Create a simple sine wave (440Hz, 20ms at 48kHz stereo = 960*2 samples)
+    let frame_size = 960;
+    let mut input_samples = vec![0i16; frame_size * 2]; // stereo
+    for i in 0..frame_size {
+        let t = i as f32 / 48000.0;
+        let sample = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+        input_samples[i * 2] = sample as i16;     // left
+        input_samples[i * 2 + 1] = sample as i16; // right
+    }
+
+    // Encode
+    let mut encoded = vec![0u8; 4000];
+    let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+    encoded.truncate(encoded_len);
+
+    // Decode
+    let mut output_samples = vec![0i16; frame_size * 2];
+    let decoded_samples = decoder.decode(&encoded, &mut output_samples, false).unwrap();
+
+    assert_eq!(decoded_samples, frame_size, "Should decode 960 samples");
+
+    // Verify samples are non-zero (actual audio, not silence)
+    let max_sample = output_samples.iter().map(|s| s.abs()).max().unwrap();
+    assert!(max_sample > 1000, "Decoded audio should have significant amplitude");
+}
+
+#[test]
+fn test_listen_decodes_real_opus_chunk_from_stdin() {
+    use opus::{Channels, Encoder, Application};
+    use mdrn_core::stream::{Chunk, Codec};
+
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("output.wav");
+    let stream_addr = hex_to_bytes(&"ab".repeat(32));
+
+    // Create a real Opus-encoded chunk
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+
+    // Create 20ms of audio (960 stereo samples)
+    let frame_size = 960;
+    let mut input_samples = vec![0i16; frame_size * 2];
+    for i in 0..frame_size {
+        let t = i as f32 / 48000.0;
+        let sample = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+        input_samples[i * 2] = sample as i16;
+        input_samples[i * 2 + 1] = sample as i16;
+    }
+
+    // Encode to Opus
+    let mut encoded = vec![0u8; 4000];
+    let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+    encoded.truncate(encoded_len);
+
+    // Create chunk
+    let chunk = Chunk::new(
+        stream_addr,
+        0,
+        0,
+        Codec::Opus,
+        20_000,
+        encoded,
+    );
+
+    // Serialize to CBOR and hex
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&chunk, &mut cbor).unwrap();
+    let chunk_hex = hex::encode(&cbor);
+    let stdin_data = format!("{}\n", chunk_hex);
+
+    // Run listen with the real Opus chunk
+    let output = run_mdrn_with_stdin(
+        &["listen", &"ab".repeat(32), "--output", output_path.to_str().unwrap()],
+        stdin_data.as_bytes(),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should decode successfully
+    assert!(
+        stdout.contains("Chunks Decoded: 1") || stdout.contains("chunks_decoded=1"),
+        "Should decode 1 chunk. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+
+    // Output file should exist and have content
+    assert!(output_path.exists(), "Output WAV file should exist");
+    let file_size = std::fs::metadata(&output_path).unwrap().len();
+    assert!(file_size > 44, "WAV file should have more than just header (size={})", file_size);
+}
+
+#[test]
+fn test_listen_handles_multiple_chunks() {
+    use opus::{Channels, Encoder, Application};
+    use mdrn_core::stream::{Chunk, Codec};
+
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("output.wav");
+    let stream_addr = hex_to_bytes(&"ab".repeat(32));
+
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+    let frame_size = 960;
+
+    let mut stdin_lines = Vec::new();
+
+    // Create 5 chunks
+    for seq in 0..5 {
+        let mut input_samples = vec![0i16; frame_size * 2];
+        let freq = 440.0 + seq as f32 * 100.0; // Different frequency per chunk
+        for i in 0..frame_size {
+            let t = i as f32 / 48000.0;
+            let sample = (t * freq * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+            input_samples[i * 2] = sample as i16;
+            input_samples[i * 2 + 1] = sample as i16;
+        }
+
+        let mut encoded = vec![0u8; 4000];
+        let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+        encoded.truncate(encoded_len);
+
+        let chunk = Chunk::new(
+            stream_addr,
+            seq,
+            seq * 20_000, // 20ms timestamps
+            Codec::Opus,
+            20_000,
+            encoded,
+        );
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&chunk, &mut cbor).unwrap();
+        stdin_lines.push(hex::encode(&cbor));
+    }
+
+    let stdin_data = stdin_lines.join("\n") + "\n";
+
+    let output = run_mdrn_with_stdin(
+        &["listen", &"ab".repeat(32), "--output", output_path.to_str().unwrap()],
+        stdin_data.as_bytes(),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should decode all 5 chunks
+    assert!(
+        stdout.contains("Chunks Decoded: 5"),
+        "Should decode 5 chunks. stdout={}",
+        stdout
+    );
+
+    // Duration should be 100ms (5 * 20ms)
+    assert!(
+        stdout.contains("Duration: 100 ms"),
+        "Duration should be 100ms. stdout={}",
+        stdout
+    );
+}
+
+// =============================================================================
+// 7. Encrypted Stream Tests
+// =============================================================================
+
+#[test]
+fn test_listen_decodes_encrypted_chunk_with_key() {
+    use opus::{Channels, Encoder, Application};
+    use mdrn_core::stream::{Chunk, Codec};
+    use mdrn_core::crypto;
+
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("output.wav");
+    let stream_addr = hex_to_bytes(&"ab".repeat(32));
+
+    // Generate stream key
+    let stream_key = crypto::generate_stream_key();
+    let key_hex = hex::encode(&stream_key);
+
+    // Create Opus audio
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+    let frame_size = 960;
+    let mut input_samples = vec![0i16; frame_size * 2];
+    for i in 0..frame_size {
+        let t = i as f32 / 48000.0;
+        let sample = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+        input_samples[i * 2] = sample as i16;
+        input_samples[i * 2 + 1] = sample as i16;
+    }
+
+    let mut encoded = vec![0u8; 4000];
+    let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+    encoded.truncate(encoded_len);
+
+    // Encrypt the Opus data
+    let (encrypted_data, nonce) = crypto::encrypt(&stream_key, &encoded).unwrap();
+
+    // Create encrypted chunk
+    let chunk = Chunk::new_encrypted(
+        stream_addr,
+        0,
+        0,
+        Codec::Opus,
+        20_000,
+        encrypted_data,
+        nonce,
+    );
+
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&chunk, &mut cbor).unwrap();
+    let stdin_data = format!("{}\n", hex::encode(&cbor));
+
+    // Run listen with the stream key
+    let output = run_mdrn_with_stdin(
+        &[
+            "listen",
+            &"ab".repeat(32),
+            "--output", output_path.to_str().unwrap(),
+            "--key", &key_hex,
+        ],
+        stdin_data.as_bytes(),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should decrypt and decode successfully
+    assert!(
+        stdout.contains("Chunks Decoded: 1"),
+        "Should decode encrypted chunk. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+}
+
+#[test]
+fn test_listen_fails_encrypted_chunk_without_key() {
+    use opus::{Channels, Encoder, Application};
+    use mdrn_core::stream::{Chunk, Codec};
+    use mdrn_core::crypto;
+
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("output.wav");
+    let stream_addr = hex_to_bytes(&"ab".repeat(32));
+
+    // Generate stream key but don't provide it
+    let stream_key = crypto::generate_stream_key();
+
+    // Create Opus audio
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+    let frame_size = 960;
+    let mut input_samples = vec![0i16; frame_size * 2];
+    for i in 0..frame_size {
+        let sample = ((i as f32 / 48000.0) * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+        input_samples[i * 2] = sample as i16;
+        input_samples[i * 2 + 1] = sample as i16;
+    }
+
+    let mut encoded = vec![0u8; 4000];
+    let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+    encoded.truncate(encoded_len);
+
+    let (encrypted_data, nonce) = crypto::encrypt(&stream_key, &encoded).unwrap();
+
+    let chunk = Chunk::new_encrypted(
+        stream_addr,
+        0,
+        0,
+        Codec::Opus,
+        20_000,
+        encrypted_data,
+        nonce,
+    );
+
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&chunk, &mut cbor).unwrap();
+    let stdin_data = format!("{}\n", hex::encode(&cbor));
+
+    // Run listen WITHOUT the stream key
+    let output = run_mdrn_with_stdin(
+        &["listen", &"ab".repeat(32), "--output", output_path.to_str().unwrap()],
+        stdin_data.as_bytes(),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should fail to decode (either error in stderr or 0 chunks decoded)
+    let decode_failed = stdout.contains("Chunks Decoded: 0") ||
+                        stderr.contains("encrypted") ||
+                        stderr.contains("no key");
+
+    assert!(
+        decode_failed,
+        "Should fail without key. stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+}
+
+#[test]
+fn test_listen_fails_with_wrong_key() {
+    use opus::{Channels, Encoder, Application};
+    use mdrn_core::stream::{Chunk, Codec};
+    use mdrn_core::crypto;
+
+    let temp_dir = TempDir::new().unwrap();
+    let output_path = temp_dir.path().join("output.wav");
+    let stream_addr = hex_to_bytes(&"ab".repeat(32));
+
+    // Generate two different keys
+    let correct_key = crypto::generate_stream_key();
+    let wrong_key = crypto::generate_stream_key();
+    let wrong_key_hex = hex::encode(&wrong_key);
+
+    // Create Opus audio
+    let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+    let frame_size = 960;
+    let mut input_samples = vec![0i16; frame_size * 2];
+    for i in 0..frame_size {
+        let sample = ((i as f32 / 48000.0) * 440.0 * 2.0 * std::f32::consts::PI).sin() * 16000.0;
+        input_samples[i * 2] = sample as i16;
+        input_samples[i * 2 + 1] = sample as i16;
+    }
+
+    let mut encoded = vec![0u8; 4000];
+    let encoded_len = encoder.encode(&input_samples, &mut encoded).unwrap();
+    encoded.truncate(encoded_len);
+
+    // Encrypt with correct key
+    let (encrypted_data, nonce) = crypto::encrypt(&correct_key, &encoded).unwrap();
+
+    let chunk = Chunk::new_encrypted(
+        stream_addr,
+        0,
+        0,
+        Codec::Opus,
+        20_000,
+        encrypted_data,
+        nonce,
+    );
+
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&chunk, &mut cbor).unwrap();
+    let stdin_data = format!("{}\n", hex::encode(&cbor));
+
+    // Run listen with WRONG key
+    let output = run_mdrn_with_stdin(
+        &[
+            "listen",
+            &"ab".repeat(32),
+            "--output", output_path.to_str().unwrap(),
+            "--key", &wrong_key_hex,
+        ],
+        stdin_data.as_bytes(),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Should fail to decrypt (decryption error or decode error)
+    let decode_failed = stdout.contains("Chunks Decoded: 0") ||
+                        stderr.contains("Decryption failed") ||
+                        stderr.contains("decrypt");
+
+    assert!(
+        decode_failed,
+        "Should fail with wrong key. stdout={}, stderr={}",
+        stdout,
         stderr
     );
 }
