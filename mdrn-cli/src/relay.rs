@@ -441,7 +441,7 @@ impl RelayNode {
 /// Run the relay command
 ///
 /// This is the main entry point called from CLI.
-pub async fn run_relay(port: u16, price: u64) -> Result<(), RelayError> {
+pub async fn run_relay(port: u16, price: u64, daemon: bool) -> Result<(), RelayError> {
     use tokio::signal;
 
     // Load or generate keypair
@@ -467,17 +467,26 @@ pub async fn run_relay(port: u16, price: u64) -> Result<(), RelayError> {
     println!("Peer ID: {:?}", relay.local_peer_id());
     println!("Listen: {:?}", relay.listen_addr());
     println!("Price: {} per minute", price);
-    println!("\nPress Ctrl+C to stop\n");
+    if daemon {
+        println!("Running in daemon mode (use SIGTERM to stop)");
 
-    // Run event loop with Ctrl+C handling
-    tokio::select! {
-        result = relay.run() => {
-            if let Err(e) = result {
-                tracing::error!("Relay error: {}", e);
-            }
+        // Daemon mode: run indefinitely until killed
+        if let Err(e) = relay.run().await {
+            tracing::error!("Relay error: {}", e);
         }
-        _ = signal::ctrl_c() => {
-            println!("\nReceived shutdown signal...");
+    } else {
+        println!("\nPress Ctrl+C to stop\n");
+
+        // Interactive mode: run with Ctrl+C handling
+        tokio::select! {
+            result = relay.run() => {
+                if let Err(e) = result {
+                    tracing::error!("Relay error: {}", e);
+                }
+            }
+            _ = signal::ctrl_c() => {
+                println!("\nReceived shutdown signal...");
+            }
         }
     }
 

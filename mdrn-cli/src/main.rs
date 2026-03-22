@@ -85,6 +85,10 @@ enum Commands {
         /// Price per minute (0 for free)
         #[arg(long, default_value = "0")]
         price: u64,
+
+        /// Run in daemon mode (disable signal handling for background operation)
+        #[arg(short, long)]
+        daemon: bool,
     },
 
     /// Discover available streams
@@ -319,7 +323,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Relay { port, price } => {
+        Commands::Relay { port, price, daemon } => {
             tracing::info!(
                 port = port,
                 price = price,
@@ -328,7 +332,7 @@ fn main() -> Result<()> {
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                if let Err(e) = relay::run_relay(port, price).await {
+                if let Err(e) = relay::run_relay(port, price, daemon).await {
                     tracing::error!("Relay error: {}", e);
                     anyhow::bail!("Relay failed: {}", e);
                 }
