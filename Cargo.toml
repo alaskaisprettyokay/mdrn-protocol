@@ -64,5 +64,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1.0"
 anyhow = "1.0"
 
+# Audio processing
+symphonia = { version = "0.5", features = ["mp3", "ogg", "flac", "wav", "pcm"] }
+opus = "0.3"
+rubato = "0.15"  # Sample rate conversion
+
+
 # Internal crates
 mdrn-core = { path = "mdrn-core" }

@@ -1,8 +1,12 @@
 //! MDRN CLI - Command-line broadcaster/listener/relay tool
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+mod broadcast;
 
 #[derive(Parser)]
 #[command(name = "mdrn")]
@@ -116,6 +120,8 @@ fn main() -> Result<()> {
             bitrate,
             encrypted,
         } => {
+            use broadcast::{load_keypair_default, load_vouch_default, run_broadcast, BroadcastConfig};
+
             tracing::info!(
                 stream_id = %stream_id,
                 input = ?input,
@@ -123,8 +129,74 @@ fn main() -> Result<()> {
                 encrypted = encrypted,
                 "Starting broadcast..."
             );
-            // TODO: Implement broadcast
-            tracing::warn!("Broadcast not yet implemented");
+
+            // Require input file for now (live capture not yet implemented)
+            let input_path = input
+                .ok_or_else(|| anyhow::anyhow!("--input <FILE> is required (live capture not yet implemented)"))?;
+            let input_path = PathBuf::from(&input_path);
+
+            if !input_path.exists() {
+                anyhow::bail!("Audio file not found: {}", input_path.display());
+            }
+
+            // Load keypair from default location or env var
+            let keypair = load_keypair_default()
+                .map_err(|e| anyhow::anyhow!("Failed to load keypair: {}. Generate one with: mdrn keygen -o ~/.mdrn/keypair.cbor", e))?;
+
+            tracing::info!(
+                identity = %hex::encode(keypair.identity().as_bytes()),
+                "Loaded broadcaster identity"
+            );
+
+            // Load vouch from default location or env var
+            let vouch = load_vouch_default()
+                .map_err(|e| anyhow::anyhow!("Failed to load vouch: {}. Obtain a vouch from an existing broadcaster.", e))?;
+
+            tracing::info!("Loaded vouch credential");
+
+            // Run broadcast pipeline
+            let config = BroadcastConfig {
+                stream_id: &stream_id,
+                input_path: &input_path,
+                bitrate_kbps: bitrate,
+                encrypted,
+            };
+
+            let result = run_broadcast(&keypair, &vouch, &config)?;
+
+            // Output results
+            println!("\n=== Broadcast Complete ===");
+            println!("Stream ID: {}", stream_id);
+            println!("Stream Address: {}", hex::encode(&result.announcement.stream_addr));
+            println!("Broadcaster: {}", hex::encode(keypair.identity().as_bytes()));
+            println!("Codec: {:?}", result.announcement.codec);
+            println!("Bitrate: {} kbps", result.announcement.bitrate);
+            println!("Sample Rate: {} Hz", result.announcement.sample_rate);
+            println!("Channels: {}", result.announcement.channels);
+            println!("Encrypted: {}", result.announcement.encrypted);
+            println!("Chunks: {}", result.chunks.len());
+            println!("Duration: {} ms", result.chunks.len() * 20);
+
+            if let Some(key) = &result.stream_key {
+                println!("Stream Key: {}", hex::encode(key));
+            }
+
+            // Output first chunk info
+            if let Some(first) = result.chunks.first() {
+                println!("\nFirst chunk:");
+                println!("  Seq: {}", first.seq);
+                println!("  Timestamp: {} us", first.timestamp);
+                println!("  Data size: {} bytes", first.data.len());
+                println!("  Keyframe: {}", first.is_keyframe());
+            }
+
+            // Output last chunk info
+            if let Some(last) = result.chunks.last() {
+                println!("\nLast chunk:");
+                println!("  Seq: {}", last.seq);
+                println!("  Timestamp: {} us", last.timestamp);
+                println!("  Data size: {} bytes", last.data.len());
+            }
         }
 
         Commands::Listen { stream, output } => {

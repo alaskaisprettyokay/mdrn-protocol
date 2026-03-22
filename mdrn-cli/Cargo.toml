@@ -26,3 +26,15 @@ tracing-subscriber.workspace = true
 
 # Error handling
 anyhow.workspace = true
+
+# Audio processing
+symphonia.workspace = true
+opus.workspace = true
+rubato.workspace = true
+
+# Serialization (for keypair/vouch loading)
+ciborium.workspace = true
+hex.workspace = true
+
+# Random number generation
+rand.workspace = true

@@ -10,9 +10,11 @@ mod config;
 mod swarm;
 
 pub use config::TransportConfig;
-pub use swarm::MdrnSwarm;
+pub use swarm::{MdrnBehaviour, MdrnBehaviourEvent, MdrnSwarm, SwarmError, MDRN_PROTOCOL_ID};
 
-use libp2p::gossipsub::IdentTopic;
+// Re-export libp2p types commonly used with MdrnSwarm
+pub use libp2p::Multiaddr;
+pub use libp2p::gossipsub::IdentTopic;
 
 /// Create a gossipsub topic for a stream
 pub fn stream_topic(stream_addr: &[u8; 32]) -> IdentTopic {

@@ -5,6 +5,8 @@ use thiserror::Error;
 
 use super::{ED25519_MULTICODEC, SECP256K1_MULTICODEC};
 
+use ciborium;
+
 /// Key type enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyType {
@@ -89,6 +91,7 @@ impl Identity {
 }
 
 /// Keypair for signing and identity
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keypair {
     key_type: KeyType,
     /// The identity (public key)
@@ -143,6 +146,11 @@ impl Keypair {
         self.key_type
     }
 
+    /// Get the secret key bytes
+    pub fn secret_bytes(&self) -> &[u8] {
+        &self.secret
+    }
+
     /// Sign a message
     pub fn sign(&self, message: &[u8]) -> Vec<u8> {
         match self.key_type {
@@ -161,6 +169,20 @@ impl Keypair {
                 signature.to_bytes().to_vec()
             }
         }
+    }
+
+    /// Serialize keypair to CBOR
+    pub fn to_cbor(&self) -> Result<Vec<u8>, IdentityError> {
+        let mut buffer = Vec::new();
+        ciborium::into_writer(self, &mut buffer)
+            .map_err(|e| IdentityError::KeyGenerationFailed(format!("CBOR serialization failed: {}", e)))?;
+        Ok(buffer)
+    }
+
+    /// Deserialize keypair from CBOR
+    pub fn from_cbor(data: &[u8]) -> Result<Self, IdentityError> {
+        ciborium::from_reader(data)
+            .map_err(|e| IdentityError::KeyGenerationFailed(format!("CBOR deserialization failed: {}", e)))
     }
 }
 
