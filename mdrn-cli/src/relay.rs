@@ -137,6 +137,9 @@ pub struct RelayNode {
     /// Bandwidth tracking: listener_id -> bytes consumed
     listener_usage: Arc<Mutex<std::collections::HashMap<mdrn_core::identity::Identity, u64>>>,
 
+    /// Trust chain verifier for vouch-based admission control
+    trust_chain: mdrn_core::identity::TrustChain,
+
     /// Received chunks queue for testing
     #[allow(dead_code)]
     received_chunks: Arc<Mutex<Vec<Chunk>>>,
@@ -166,6 +169,7 @@ impl RelayNode {
             received_chunks: Arc::new(Mutex::new(Vec::new())),
             listener_payments: Arc::new(Mutex::new(HashMap::new())),
             listener_usage: Arc::new(Mutex::new(HashMap::new())),
+            trust_chain: mdrn_core::identity::TrustChain::new(mdrn_core::identity::genesis_broadcasters()),
         })
     }
 
@@ -557,6 +561,29 @@ impl RelayNode {
         // Then check if payment is sufficient
         self.check_payment_sufficient(listener_id).await
     }
+
+    /// Verify broadcaster admission based on vouch credentials
+    pub fn verify_broadcaster_admission(&self, broadcaster: &mdrn_core::identity::Identity, vouch: &mdrn_core::identity::Vouch) -> Result<(), String> {
+        // In testnet mode, always allow
+        if !self.config.network_mode.requires_vouches() {
+            return Ok(());
+        }
+
+        // Verify the vouch chain
+        self.trust_chain.verify_broadcaster_admission(broadcaster, vouch)
+            .map_err(|e| format!("Vouch verification failed: {}", e))
+    }
+
+    /// Check if a broadcaster can vouch for others
+    pub fn can_broadcaster_vouch(&self, broadcaster: &mdrn_core::identity::Identity) -> bool {
+        // In testnet mode, anyone can vouch (for testing)
+        if !self.config.network_mode.requires_vouches() {
+            return true;
+        }
+
+        // In mainnet mode, check trust chain
+        self.trust_chain.can_vouch(broadcaster)
+    }
 }
 
 /// Run the relay command
@@ -704,5 +731,63 @@ mod tests {
         let relay = relay.unwrap();
         assert!(!relay.is_running());
         assert!(relay.listen_addr().is_none());
+    }
+
+    #[test]
+    fn test_vouch_verification_testnet() {
+        use mdrn_core::identity::{Keypair, Vouch};
+        use mdrn_core::transport::NetworkMode;
+
+        // Create testnet relay config
+        let config = RelayConfig {
+            port: 9999,
+            network_mode: NetworkMode::Testnet,
+            payment_config: None,
+            keypair: None,
+        };
+
+        let node = RelayNode::new(config).unwrap();
+
+        // Create a test broadcaster and vouch
+        let broadcaster = Keypair::generate_ed25519().unwrap();
+        let issuer = Keypair::generate_ed25519().unwrap();
+        let vouch = Vouch::create(
+            broadcaster.identity().clone(),
+            &issuer,
+            None,
+        ).unwrap();
+
+        // In testnet mode, vouch verification should always pass
+        assert!(node.verify_broadcaster_admission(broadcaster.identity(), &vouch).is_ok());
+        assert!(node.can_broadcaster_vouch(broadcaster.identity()));
+    }
+
+    #[test]
+    fn test_vouch_verification_mainnet() {
+        use mdrn_core::identity::{Keypair, Vouch};
+        use mdrn_core::transport::NetworkMode;
+
+        // Create mainnet relay config
+        let config = RelayConfig {
+            port: 9999,
+            network_mode: NetworkMode::Mainnet,
+            payment_config: None,
+            keypair: None,
+        };
+
+        let node = RelayNode::new(config).unwrap();
+
+        // Create a test broadcaster and vouch from non-genesis issuer
+        let broadcaster = Keypair::generate_ed25519().unwrap();
+        let non_genesis_issuer = Keypair::generate_ed25519().unwrap();
+        let vouch = Vouch::create(
+            broadcaster.identity().clone(),
+            &non_genesis_issuer,
+            None,
+        ).unwrap();
+
+        // In mainnet mode with no genesis keys, vouch verification should fail
+        assert!(node.verify_broadcaster_admission(broadcaster.identity(), &vouch).is_err());
+        assert!(!node.can_broadcaster_vouch(broadcaster.identity()));
     }
 }

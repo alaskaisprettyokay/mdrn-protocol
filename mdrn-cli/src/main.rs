@@ -215,11 +215,43 @@ fn main() -> Result<()> {
                 "Loaded broadcaster identity"
             );
 
-            // Load vouch from default location or env var
-            let vouch = load_vouch_default()
-                .map_err(|e| anyhow::anyhow!("Failed to load vouch: {}. Obtain a vouch from an existing broadcaster.", e))?;
+            // Parse network mode for broadcast
+            let network_mode = match mode.as_str() {
+                "testnet" => {
+                    tracing::info!("Broadcast mode: testnet (no vouch required)");
+                    mdrn_core::transport::NetworkMode::Testnet
+                },
+                "mainnet" => {
+                    tracing::info!("Broadcast mode: mainnet (vouch required)");
+                    mdrn_core::transport::NetworkMode::Mainnet
+                },
+                _ => anyhow::bail!("Invalid mode '{}'. Use 'testnet' or 'mainnet'.", mode),
+            };
 
-            tracing::info!("Loaded vouch credential");
+            // Load vouch based on network mode
+            let vouch = if network_mode.requires_vouches() {
+                // Mainnet requires vouch
+                if let Some(vouch_path) = &vouch_file {
+                    // Load from specified file
+                    let vouch_data = std::fs::read(vouch_path)
+                        .map_err(|e| anyhow::anyhow!("Failed to read vouch file {}: {}", vouch_path, e))?;
+                    ciborium::from_reader(&vouch_data[..])
+                        .map_err(|e| anyhow::anyhow!("Failed to parse vouch file: {}", e))?
+                } else {
+                    // Try default location
+                    load_vouch_default()
+                        .map_err(|e| anyhow::anyhow!("Mainnet mode requires vouch. Specify --vouch-file or place vouch at default location. Error: {}", e))?
+                }
+            } else {
+                // Testnet mode - create a dummy vouch (won't be checked)
+                load_vouch_default()
+                    .map_err(|e| anyhow::anyhow!("Failed to load vouch: {}. Obtain a vouch from an existing broadcaster.", e))?
+            };
+
+            tracing::info!(
+                network_mode = ?network_mode,
+                "Loaded vouch credential"
+            );
 
             // Run broadcast pipeline
             let config = BroadcastConfig {
@@ -317,6 +349,35 @@ fn main() -> Result<()> {
             } else {
                 None
             };
+
+            // Parse network mode for listen
+            let network_mode = match mode.as_str() {
+                "testnet" => {
+                    tracing::info!("Listen mode: testnet (free)");
+                    mdrn_core::transport::NetworkMode::Testnet
+                },
+                "mainnet" => {
+                    tracing::info!("Listen mode: mainnet (payment required)");
+                    mdrn_core::transport::NetworkMode::Mainnet
+                },
+                _ => anyhow::bail!("Invalid mode '{}'. Use 'testnet' or 'mainnet'.", mode),
+            };
+
+            // Parse payment method
+            let payment_method_parsed = match payment_method.as_str() {
+                "free" => mdrn_core::payment::PaymentMethod::Free,
+                "evm-l2" => mdrn_core::payment::PaymentMethod::EvmL2,
+                "lightning" => mdrn_core::payment::PaymentMethod::Lightning,
+                "superfluid" => mdrn_core::payment::PaymentMethod::Superfluid,
+                _ => anyhow::bail!("Invalid payment method '{}'. Use 'free', 'evm-l2', 'lightning', or 'superfluid'.", payment_method),
+            };
+
+            tracing::info!(
+                network_mode = ?network_mode,
+                payment_method = ?payment_method_parsed,
+                max_spend = max_spend,
+                "Listen configuration"
+            );
 
             let output_path = output.map(PathBuf::from);
 

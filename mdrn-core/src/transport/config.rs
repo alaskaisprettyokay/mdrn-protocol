@@ -100,7 +100,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             network_mode: NetworkMode::default(),
-            genesis_keys: Vec::new(), // TBD
+            genesis_keys: crate::identity::genesis_broadcasters(),
             payment_config: None,
             listen_addrs: vec![
                 "/ip4/0.0.0.0/tcp/0".to_string(),
