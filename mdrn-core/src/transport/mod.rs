@@ -9,7 +9,7 @@
 mod config;
 mod swarm;
 
-pub use config::TransportConfig;
+pub use config::{NetworkMode, PaymentConfig, TransportConfig};
 pub use swarm::{MdrnBehaviour, MdrnBehaviourEvent, MdrnSwarm, SwarmError, MDRN_PROTOCOL_ID};
 
 // Re-export libp2p types commonly used with MdrnSwarm

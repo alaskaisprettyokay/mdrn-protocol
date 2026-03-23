@@ -7,7 +7,7 @@
 //! - Track metrics (peers, streams, bytes forwarded)
 //! - Handle graceful shutdown with statistics
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -54,8 +54,11 @@ pub struct RelayConfig {
     /// Port to listen on (0 for random)
     pub port: u16,
 
-    /// Price per minute in base units (0 for free)
-    pub price_per_min: u64,
+    /// Network mode (testnet vs mainnet)
+    pub network_mode: mdrn_core::transport::NetworkMode,
+
+    /// Payment configuration (optional)
+    pub payment_config: Option<mdrn_core::transport::PaymentConfig>,
 
     /// Optional keypair (generates new if None)
     pub keypair: Option<Keypair>,
@@ -65,7 +68,8 @@ impl Default for RelayConfig {
     fn default() -> Self {
         Self {
             port: 9000,
-            price_per_min: 0,
+            network_mode: mdrn_core::transport::NetworkMode::Testnet,
+            payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
             keypair: None,
         }
     }
@@ -127,6 +131,12 @@ pub struct RelayNode {
     /// Final metrics (set after shutdown)
     final_metrics: Option<RelayMetrics>,
 
+    /// Payment tracking: listener_id -> latest payment commitment
+    listener_payments: Arc<Mutex<std::collections::HashMap<mdrn_core::identity::Identity, mdrn_core::payment::PaymentCommitment>>>,
+
+    /// Bandwidth tracking: listener_id -> bytes consumed
+    listener_usage: Arc<Mutex<std::collections::HashMap<mdrn_core::identity::Identity, u64>>>,
+
     /// Received chunks queue for testing
     #[allow(dead_code)]
     received_chunks: Arc<Mutex<Vec<Chunk>>>,
@@ -154,6 +164,8 @@ impl RelayNode {
             start_time: None,
             final_metrics: None,
             received_chunks: Arc::new(Mutex::new(Vec::new())),
+            listener_payments: Arc::new(Mutex::new(HashMap::new())),
+            listener_usage: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -482,12 +494,80 @@ impl RelayNode {
     pub fn final_metrics(&self) -> Option<RelayMetrics> {
         self.final_metrics.clone()
     }
+
+    /// Record bandwidth usage for a listener
+    pub async fn record_bandwidth_usage(&self, listener_id: &mdrn_core::identity::Identity, bytes: u64) {
+        let mut usage = self.listener_usage.lock().await;
+        *usage.entry(listener_id.clone()).or_insert(0) += bytes;
+    }
+
+    /// Update payment commitment for a listener
+    pub async fn update_payment_commitment(&self, commitment: mdrn_core::payment::PaymentCommitment) -> Result<(), String> {
+        // Verify the commitment signature
+        commitment.verify_signature()
+            .map_err(|e| format!("Invalid payment commitment signature: {}", e))?;
+
+        // Check if this supersedes previous commitment
+        let mut payments = self.listener_payments.lock().await;
+        if let Some(previous) = payments.get(&commitment.listener_id) {
+            commitment.validate_supersedes(previous)
+                .map_err(|e| format!("Payment commitment does not supersede previous: {}", e))?;
+        }
+
+        payments.insert(commitment.listener_id.clone(), commitment);
+        Ok(())
+    }
+
+    /// Check if listener has sufficient payment for their usage
+    pub async fn check_payment_sufficient(&self, listener_id: &mdrn_core::identity::Identity) -> bool {
+        // In testnet mode, always allow
+        if !self.config.network_mode.requires_payment() {
+            return true;
+        }
+
+        let usage = self.listener_usage.lock().await;
+        let payments = self.listener_payments.lock().await;
+
+        let bytes_used = usage.get(listener_id).copied().unwrap_or(0);
+        let payment_amount = payments.get(listener_id)
+            .map(|p| p.amount)
+            .unwrap_or(0);
+
+        // Calculate required payment based on config
+        if let Some(ref payment_config) = self.config.payment_config {
+            let mb_used = (bytes_used + 1024 * 1024 - 1) / (1024 * 1024); // Round up to MB
+            let required_amount = mb_used * payment_config.price_per_mb;
+            payment_amount >= required_amount
+        } else {
+            // No payment config means free
+            true
+        }
+    }
+
+    /// Enforce payment limits for a listener before forwarding a chunk
+    pub async fn enforce_payment_limits(&self, listener_id: &mdrn_core::identity::Identity, chunk_size: u64) -> bool {
+        // In testnet mode, always allow
+        if !self.config.network_mode.requires_payment() {
+            return true;
+        }
+
+        // Record the bandwidth usage first
+        self.record_bandwidth_usage(listener_id, chunk_size).await;
+
+        // Then check if payment is sufficient
+        self.check_payment_sufficient(listener_id).await
+    }
 }
 
 /// Run the relay command
 ///
 /// This is the main entry point called from CLI.
-pub async fn run_relay(port: u16, price: u64, daemon: bool) -> Result<(), RelayError> {
+pub async fn run_relay(
+    port: u16,
+    network_mode: mdrn_core::transport::NetworkMode,
+    payment_config: Option<mdrn_core::transport::PaymentConfig>,
+    daemon: bool
+) -> Result<(), RelayError> {
     use tokio::signal;
 
     // Load or generate keypair
@@ -500,7 +580,8 @@ pub async fn run_relay(port: u16, price: u64, daemon: bool) -> Result<(), RelayE
 
     let config = RelayConfig {
         port,
-        price_per_min: price,
+        network_mode,
+        payment_config: payment_config.clone(),
         keypair: Some(keypair),
     };
 
@@ -512,7 +593,15 @@ pub async fn run_relay(port: u16, price: u64, daemon: bool) -> Result<(), RelayE
     println!("\n=== MDRN Relay Node ===");
     println!("Peer ID: {:?}", relay.local_peer_id());
     println!("Listen: {:?}", relay.listen_addr());
-    println!("Price: {} per minute", price);
+    println!("Mode: {}", if network_mode.requires_payment() { "mainnet" } else { "testnet" });
+    if let Some(ref config) = payment_config {
+        println!("Price: {} {} per MB", config.price_per_mb, config.currency);
+        if let Some(ref contract) = config.settlement_contract {
+            println!("Settlement contract: {}", contract);
+        }
+    } else {
+        println!("Price: FREE");
+    }
     if daemon {
         println!("Running in daemon mode (use SIGTERM to stop)");
 
@@ -591,7 +680,8 @@ mod tests {
     fn test_relay_config_default() {
         let config = RelayConfig::default();
         assert_eq!(config.port, 9000);
-        assert_eq!(config.price_per_min, 0);
+        assert_eq!(config.network_mode, mdrn_core::transport::NetworkMode::Testnet);
+        assert!(config.payment_config.is_some());
         assert!(config.keypair.is_none());
     }
 

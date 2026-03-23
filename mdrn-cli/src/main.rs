@@ -51,6 +51,14 @@ enum Commands {
         /// Relay node address to connect to (e.g. /ip4/127.0.0.1/tcp/9000)
         #[arg(short, long)]
         relay: Option<String>,
+
+        /// Network mode (testnet or mainnet)
+        #[arg(long, default_value = "testnet")]
+        mode: String,
+
+        /// Vouch file path (required for mainnet mode)
+        #[arg(long)]
+        vouch_file: Option<String>,
     },
 
     /// Listen to a stream
@@ -74,6 +82,18 @@ enum Commands {
         /// Relay node address to connect to (e.g. /ip4/127.0.0.1/tcp/9000)
         #[arg(short, long)]
         relay: Option<String>,
+
+        /// Network mode (testnet or mainnet)
+        #[arg(long, default_value = "testnet")]
+        mode: String,
+
+        /// Payment method (free, evm-l2, lightning, superfluid)
+        #[arg(long, default_value = "free")]
+        payment_method: String,
+
+        /// Maximum amount to spend (in base units)
+        #[arg(long, default_value = "1000")]
+        max_spend: u64,
     },
 
     /// Run as a relay node
@@ -82,9 +102,21 @@ enum Commands {
         #[arg(short, long, default_value = "9000")]
         port: u16,
 
-        /// Price per minute (0 for free)
-        #[arg(long, default_value = "0")]
-        price: u64,
+        /// Network mode (testnet or mainnet)
+        #[arg(long, default_value = "testnet")]
+        mode: String,
+
+        /// Price per MB in base units (0 for free)
+        #[arg(long, default_value = "100")]
+        price_per_mb: u64,
+
+        /// Currency code (e.g., USDC, BTC)
+        #[arg(long, default_value = "USDC")]
+        currency: String,
+
+        /// Settlement contract address (for on-chain payment methods)
+        #[arg(long)]
+        settlement_contract: Option<String>,
 
         /// Run in daemon mode (disable signal handling for background operation)
         #[arg(short, long)]
@@ -151,6 +183,8 @@ fn main() -> Result<()> {
             encrypted,
             network,
             relay,
+            mode,
+            vouch_file,
         } => {
             use broadcast::{load_keypair_default, load_vouch_default, run_broadcast, BroadcastConfig};
 
@@ -248,7 +282,7 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Listen { stream, output, key, network, relay } => {
+        Commands::Listen { stream, output, key, network, relay, mode, payment_method, max_spend } => {
             use listen::{parse_stream_address, run_listen_stdin, ListenConfig, ParsedAddress};
 
             tracing::info!(
@@ -323,16 +357,47 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Relay { port, price, daemon } => {
+        Commands::Relay {
+            port,
+            mode,
+            price_per_mb,
+            currency,
+            settlement_contract,
+            daemon
+        } => {
+            use mdrn_core::transport::{NetworkMode, PaymentConfig};
+            use mdrn_core::payment::PaymentMethod;
+
+            // Parse network mode
+            let network_mode = match mode.as_str() {
+                "testnet" => NetworkMode::Testnet,
+                "mainnet" => NetworkMode::Mainnet,
+                _ => anyhow::bail!("Invalid mode '{}'. Use 'testnet' or 'mainnet'.", mode),
+            };
+
+            // Create payment config (only for mainnet)
+            let payment_config = if network_mode.requires_payment() {
+                Some(PaymentConfig::new(
+                    PaymentMethod::EvmL2, // Default to EVM L2 for now
+                    currency.clone(),
+                    price_per_mb,
+                    settlement_contract.clone(),
+                ))
+            } else {
+                Some(PaymentConfig::testnet()) // Free testnet config
+            };
+
             tracing::info!(
                 port = port,
-                price = price,
+                mode = %mode,
+                price_per_mb = price_per_mb,
+                currency = %currency,
                 "Starting relay node..."
             );
 
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async {
-                if let Err(e) = relay::run_relay(port, price, daemon).await {
+                if let Err(e) = relay::run_relay(port, network_mode, payment_config, daemon).await {
                     tracing::error!("Relay error: {}", e);
                     anyhow::bail!("Relay failed: {}", e);
                 }
