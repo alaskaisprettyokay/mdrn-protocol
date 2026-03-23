@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use mdrn_core::crypto;
 use mdrn_core::stream::{Chunk, StreamAnnouncement};
-use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE, MdrnBehaviourEvent};
+use mdrn_core::transport::{stream_topic, MdrnSwarm, TransportConfig, DHT_STREAM_NAMESPACE};
 
 /// Configuration for listen operation
 pub struct ListenConfig {

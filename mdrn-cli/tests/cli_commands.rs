@@ -497,11 +497,17 @@ fn test_broadcast_requires_keypair() {
 
     create_test_wav(&audio_path, 0.5, 48000);
 
-    let output = run_mdrn(&[
-        "broadcast",
-        "--stream-id", "test-stream",
-        "--input", audio_path.to_str().unwrap(),
-    ]);
+    // Run with clean HOME directory (no default keypair)
+    let output = Command::new("cargo")
+        .args(["run", "--package", "mdrn-cli", "--"])
+        .args([
+            "broadcast",
+            "--stream-id", "test-stream",
+            "--input", audio_path.to_str().unwrap(),
+        ])
+        .env("HOME", temp_dir.path())  // Set HOME to temp dir (no ~/.mdrn/keypair.cbor)
+        .output()
+        .expect("Failed to execute command");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
 

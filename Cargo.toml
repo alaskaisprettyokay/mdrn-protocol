@@ -4,6 +4,7 @@ members = [
     "mdrn-core",
     "mdrn-cli",
     "mdrn-relay",
+    "mdrn-wasm",
 ]
 
 [workspace.package]
@@ -31,6 +32,7 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }
 
 # Networking
 libp2p = { version = "0.54", features = [

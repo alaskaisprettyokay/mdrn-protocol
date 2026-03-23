@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{PaymentCommitment, PaymentMethod};
-use crate::identity::Identity;
 
 /// Settlement errors
 #[derive(Debug, Error)]

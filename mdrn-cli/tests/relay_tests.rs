@@ -216,7 +216,8 @@ async fn test_relay_config_defaults() {
 
     let config = RelayConfig::default();
     assert_eq!(config.port, 9000);
-    assert_eq!(config.price_per_min, 0);
+    assert!(config.payment_config.is_some());
+    assert_eq!(config.payment_config.as_ref().unwrap().price_per_mb, 0);
 
     let metrics = RelayMetrics::default();
     assert_eq!(metrics.peers_connected, 0);
@@ -232,7 +233,8 @@ async fn test_relay_node_creation() {
     let keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(keypair),
     };
 
@@ -260,7 +262,8 @@ async fn test_relay_accept_peer_connection() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
@@ -296,7 +299,8 @@ async fn test_relay_receives_chunks() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair.clone()),
     };
 
@@ -336,7 +340,8 @@ async fn test_relay_forwards_chunks() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
     let mut relay = RelayNode::new(config).expect("relay should create");
@@ -384,7 +389,8 @@ async fn test_relay_subscription_tracking() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair.clone()),
     };
 
@@ -421,7 +427,8 @@ async fn test_relay_tracks_peer_count() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
@@ -440,7 +447,8 @@ async fn test_relay_tracks_bytes_forwarded() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
@@ -463,7 +471,8 @@ async fn test_relay_graceful_shutdown() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
@@ -486,7 +495,8 @@ async fn test_relay_prints_stats_on_shutdown() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
@@ -518,7 +528,8 @@ async fn test_relay_port_conflict() {
     let keypair = create_test_keypair();
     let config = RelayConfig {
         port: bound_port,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(keypair),
     };
     let mut relay = RelayNode::new(config).expect("relay should create");
@@ -551,7 +562,8 @@ async fn test_relay_full_workflow() {
     let relay_keypair = create_test_keypair();
     let config = RelayConfig {
         port: 0,
-        price_per_min: 0,
+        network_mode: mdrn_core::transport::NetworkMode::Testnet,
+        payment_config: Some(mdrn_core::transport::PaymentConfig::testnet()),
         keypair: Some(relay_keypair),
     };
 
